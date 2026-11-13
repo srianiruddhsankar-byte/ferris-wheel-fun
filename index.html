@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Paper Ferris Wheel</title>
+  <meta name="theme-color" content="#9fd3ee">
+  <meta name="description" content="A paper-craft Ferris wheel ride for two.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500;700&family=Nunito:wght@500;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app" data-phase="idle" data-cam="side">
+
+  <!-- ===================== THE WORLD ===================== -->
+  <div id="stage" aria-hidden="true">
+
+    <!-- Screen-space sky: gradient, stars, sun, moon, clouds -->
+    <div id="sky">
+      <div id="stars"></div>
+      <div id="sky-objects">
+        <svg id="sun" class="paper-shadow" viewBox="0 0 100 100"></svg>
+        <svg id="moon" class="paper-shadow" viewBox="0 0 100 100"></svg>
+        <div id="clouds"></div>
+      </div>
+    </div>
+
+    <!-- Scene-space SVG: skyline, wheel, foreground. viewBox is driven by the camera in script.js -->
+    <svg id="scene" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <!-- Soft shadow between paper layers -->
+        <filter id="paper" x="-10%" y="-10%" width="120%" height="130%">
+          <feDropShadow dx="0" dy="3" stdDeviation="3.5" flood-color="#22183a" flood-opacity="0.22"/>
+        </filter>
+        <filter id="paper-strong" x="-10%" y="-10%" width="120%" height="130%">
+          <feDropShadow dx="0" dy="5" stdDeviation="5" flood-color="#22183a" flood-opacity="0.28"/>
+        </filter>
+      </defs>
+      <g id="city-far" filter="url(#paper)"></g>
+      <g id="city-mid" filter="url(#paper)"></g>
+      <g id="wheel-layer">
+        <g id="wheel-supports" filter="url(#paper)"></g>
+        <g id="wheel-rot" filter="url(#paper-strong)"></g>
+        <g id="cabins" filter="url(#paper)"></g>
+      </g>
+      <g id="foreground" filter="url(#paper-strong)"></g>
+    </svg>
+
+    <!-- Night-time fireflies (screen space) -->
+    <div id="fireflies"></div>
+  </div>
+
+  <!-- First-person cabin window frame (built in JS to fit the screen) -->
+  <svg id="window-frame" aria-hidden="true"></svg>
+
+  <!-- The two riders, shown inside the cabin -->
+  <div id="riders" aria-hidden="true">
+    <div class="riders-inner">
+      <div class="rider" data-rider="0">
+        <svg class="avatar" viewBox="0 0 40 40">
+          <path class="hair-back" d="M8 20 Q8 5 20 5 Q32 5 32 20 V30 Q26 32 20 31 Q14 32 8 30Z"/>
+          <path class="shirt" d="M7 40 Q7 29 20 29 Q33 29 33 40Z"/>
+          <circle class="face" cx="20" cy="18" r="10"/>
+          <path class="hair-front" d="M10 16 Q12 7 21 7 Q29 8 30.5 16 Q25 11 18 13 Q13 14 10 16Z"/>
+          <circle class="eye" cx="16.5" cy="19" r="1.1"/><circle class="eye" cx="23.5" cy="19" r="1.1"/>
+          <circle class="blush" cx="14" cy="22" r="1.8"/><circle class="blush" cx="26" cy="22" r="1.8"/>
+          <path class="smile" d="M18 23.2 Q20 25 22 23.2"/>
+        </svg>
+        <span class="rider-name"></span>
+      </div>
+      <div class="rider" data-rider="1">
+        <svg class="avatar" viewBox="0 0 40 40">
+          <path class="shirt" d="M7 40 Q7 29 20 29 Q33 29 33 40Z"/>
+          <circle class="face" cx="20" cy="18" r="10"/>
+          <path class="hair-front" d="M9.5 17 Q9 7 20 6.5 Q31 7 30.5 17 Q27 11 20 12 Q13 11 9.5 17Z"/>
+          <path class="hair-front" d="M18 7.5 Q20 2 24.5 3.5 Q21 4.5 21.5 8Z"/>
+          <circle class="eye" cx="16.5" cy="19" r="1.1"/><circle class="eye" cx="23.5" cy="19" r="1.1"/>
+          <circle class="blush" cx="14" cy="22" r="1.8"/><circle class="blush" cx="26" cy="22" r="1.8"/>
+          <path class="smile" d="M18 23.2 Q20 25 22 23.2"/>
+        </svg>
+        <span class="rider-name"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Floating emoji reactions are appended here -->
+  <div id="floaters" aria-hidden="true"></div>
+
+  <!-- ===================== CORNER CONTROLS ===================== -->
+  <nav id="controls" aria-label="Ride controls">
+    <div class="ctrl">
+      <button class="icon-btn" id="btn-camera" aria-pressed="false" aria-label="Switch camera view" title="Switch view">
+        <svg viewBox="0 0 24 24"><path d="M3.5 8.5a2 2 0 0 1 2-2h2l1.5-2h6l1.5 2h2a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2z"/><circle cx="12" cy="13" r="3.6"/></svg>
+      </button>
+    </div>
+    <div class="ctrl" data-rider="0">
+      <button class="icon-btn react-btn" aria-label="Rider 1 reactions (keys 1–5)" title="Rider 1 reactions (keys 1–5)" aria-expanded="false">
+        <svg viewBox="0 0 24 24"><path class="heart" d="M12 20s-7.5-4.6-7.5-10A4.2 4.2 0 0 1 12 7.6 4.2 4.2 0 0 1 19.5 10C19.5 15.4 12 20 12 20z"/></svg>
+      </button>
+      <div class="emoji-row" role="menu" hidden></div>
+    </div>
+    <div class="ctrl" data-rider="1">
+      <button class="icon-btn react-btn" aria-label="Rider 2 reactions (keys 6–0)" title="Rider 2 reactions (keys 6–0)" aria-expanded="false">
+        <svg viewBox="0 0 24 24"><path class="heart" d="M12 20s-7.5-4.6-7.5-10A4.2 4.2 0 0 1 12 7.6 4.2 4.2 0 0 1 19.5 10C19.5 15.4 12 20 12 20z"/></svg>
+      </button>
+      <div class="emoji-row" role="menu" hidden></div>
+    </div>
+    <div class="ctrl">
+      <button class="icon-btn" id="btn-sound" aria-pressed="false" aria-label="Sound on/off" title="Sound">
+        <svg viewBox="0 0 24 24">
+          <path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/>
+          <g class="sound-on"><path d="M15.5 9a4 4 0 0 1 0 6"/><path d="M18 6.5a7.5 7.5 0 0 1 0 11"/></g>
+          <g class="sound-off"><path d="M16 9.5l5 5M21 9.5l-5 5"/></g>
+        </svg>
+      </button>
+    </div>
+  </nav>
+
+  <!-- ===================== QUESTION CARD (top of the wheel) ===================== -->
+  <section id="question" class="overlay" hidden aria-live="polite">
+    <div class="q-card">
+      <div class="q-top paper-card">
+        <p class="q-kicker">at the top of the wheel</p>
+        <h2 id="q-text"></h2>
+      </div>
+      <div class="q-bottom paper-card">
+        <div class="answers">
+          <!-- One answer card per rider; .ac-front = typing side, .ac-back = revealed answer -->
+          <div class="answer-card" data-rider="0">
+            <div class="ac-inner">
+              <form class="ac-front">
+                <span class="ac-name"></span>
+                <textarea maxlength="140" rows="3" placeholder="Your answer…"></textarea>
+                <button type="submit" class="paper-btn small">Fold &amp; send</button>
+                <p class="ac-sealed">✉︎ sealed — waiting…</p>
+              </form>
+              <div class="ac-back"><span class="ac-name"></span><p class="ac-answer"></p></div>
+            </div>
+          </div>
+          <div class="answer-card" data-rider="1">
+            <div class="ac-inner">
+              <form class="ac-front">
+                <span class="ac-name"></span>
+                <textarea maxlength="140" rows="3" placeholder="Your answer…"></textarea>
+                <button type="submit" class="paper-btn small">Fold &amp; send</button>
+                <p class="ac-sealed">✉︎ sealed — waiting…</p>
+              </form>
+              <div class="ac-back"><span class="ac-name"></span><p class="ac-answer"></p></div>
+            </div>
+          </div>
+        </div>
+        <button class="paper-btn q-continue" id="btn-continue" hidden>Continue the ride</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== START SCREEN ===================== -->
+  <section id="start" class="overlay">
+    <form class="start-card paper-card" id="start-form" autocomplete="off">
+      <h1>Paper Ferris Wheel</h1>
+      <p class="sub">a ride for two</p>
+      <label class="name-field" data-rider="0">
+        <span class="dot"></span>
+        <input id="name-0" maxlength="18" placeholder="Rider 1" aria-label="Rider 1 name">
+      </label>
+      <label class="name-field" data-rider="1">
+        <span class="dot"></span>
+        <input id="name-1" maxlength="18" placeholder="Rider 2" aria-label="Rider 2 name">
+      </label>
+      <button type="submit" class="paper-btn" id="btn-board" disabled>Board</button>
+    </form>
+  </section>
+
+  <!-- ===================== END SCREEN / POSTCARD ===================== -->
+  <section id="end" class="overlay" hidden>
+    <div class="end-inner">
+      <div class="postcard-wrap">
+        <div id="postcard">
+          <div class="pc-scene" id="pc-scene"></div>
+          <div class="pc-body">
+            <h2 class="pc-title"><span id="pc-n0"></span> &amp; <span id="pc-n1"></span> rode the wheel</h2>
+            <p class="pc-date" id="pc-date"></p>
+            <p class="pc-q" id="pc-q"></p>
+            <p class="pc-a"><b id="pc-an0"></b> <span id="pc-a0"></span></p>
+            <p class="pc-a"><b id="pc-an1"></b> <span id="pc-a1"></span></p>
+          </div>
+        </div>
+      </div>
+      <div class="end-actions">
+        <button class="paper-btn" id="btn-download">Download postcard</button>
+        <button class="paper-btn ghost" id="btn-again">Ride again</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Paper grain over everything -->
+  <div id="grain" aria-hidden="true"></div>
+</div>
+
+<!-- html2canvas (postcard download) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" defer></script>
+<script src="script.js" defer></script>
+</body>
+</html>
