@@ -80,13 +80,13 @@ const CONFIG = {
   /* ---- Sound ------------------------------------------------------------ */
   // Optional real recordings. Any file that's missing is generated live instead.
   SOUND_FILES: {
-    wind: 'assets/wind.mp3',
     creak: 'assets/wheel-creak.mp3',
     fair: 'assets/fair-music.mp3',
     crickets: 'assets/crickets.mp3',
   },
   // Layer volumes, 0..1
-  SOUND_LEVELS: { wind: 0.35, creak: 0.22, fair: 0.3, crickets: 0.32 },
+  SOUND_LEVELS: { creak: 0.22, fair: 0.34, crickets: 0.32 },
+  SOUND_MASTER: 3.2,           // overall volume
 
   /* ---- Reactions -------------------------------------------------------- */
   EMOJIS: ['❤️', '✨', '😂', '😳', '🥹'],
@@ -759,8 +759,8 @@ function updateWindows(dt) {
 }
 
 /* ---- Sound ----------------------------------------------------------------
-   Four layers whose volumes follow the ride: wind (always), wheel creak (while
-   moving), a distant music-box tune by day, crickets at night.
+   Three layers whose volumes follow the ride: wheel creak (while moving),
+   distant fair music by day, crickets at night.
 
    Each layer uses a real file from /assets if one is there (see
    CONFIG.SOUND_FILES); otherwise it is generated live with the Web Audio API,
@@ -769,7 +769,6 @@ const Sound = {
   ctx: null,
   master: null,
   layers: {},     // name → { el, fileReady, gain, direct, synth, vol }
-  noise: null,
 
   /** Look for real files in the background. Missing files are fine. */
   init() {
@@ -789,8 +788,12 @@ const Sound = {
     if (!AC) return false;
     const ctx = (this.ctx = new AC());
     this.master = ctx.createGain();
-    this.master.gain.value = 0.9;
-    this.master.connect(ctx.destination);
+    this.master.gain.value = CONFIG.SOUND_MASTER;
+    // Gentle limiter so nothing distorts on small phone speakers.
+    const limiter = ctx.createDynamicsCompressor();
+    limiter.threshold.value = -10; limiter.knee.value = 8; limiter.ratio.value = 6;
+    limiter.attack.value = 0.005; limiter.release.value = 0.25;
+    this.master.connect(limiter).connect(ctx.destination);
     const http = /^https?:/.test(location.protocol);
 
     for (const [name, L] of Object.entries(this.layers)) {
@@ -803,7 +806,6 @@ const Sound = {
         L.direct = true; L.el.volume = 0;                         // file:// → plain <audio>
       } else {
         L.synth = true;                                           // generated live
-        if (name === 'wind') this.buildWind(L.gain);
         if (name === 'fair') this.buildMusicBus(L);
       }
     }
@@ -831,7 +833,6 @@ const Sound = {
     const lv = CONFIG.SOUND_LEVELS, p = state.p;
     const riding = ['up', 'down'].includes(state.phase);
     const target = {
-      wind: lv.wind,
       creak: riding ? lv.creak * (0.3 + 0.7 * state.speedNorm) : 0,
       fair: lv.fair * (1 - smoothstep(0.42, 0.62, p)),
       crickets: lv.crickets * smoothstep(0.5, 0.7, p),
@@ -847,30 +848,6 @@ const Sound = {
     if (S.creak.synth && target.creak > 0.005) this.scheduleCreaks(now);
     if (S.fair.synth && target.fair > 0.005) this.scheduleMusic(now); else this.musicT = 0;
     if (S.crickets.synth && target.crickets > 0.005) this.scheduleCrickets(now);
-  },
-
-  /* ---- Wind: brown noise through a slowly wandering band-pass filter ---- */
-  buildWind(out) {
-    const ctx = this.ctx;
-    const len = ctx.sampleRate * 8, fade = ctx.sampleRate * 0.5;
-    const buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
-    let last = 0;
-    for (let i = 0; i < len; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; d[i] = last * 3.5; }
-    for (let i = 0; i < fade; i++) { const t = i / fade; d[i] = d[i] * t + d[len - fade + i] * (1 - t); } // seamless loop
-    const src = ctx.createBufferSource();
-    src.buffer = buf; src.loop = true; src.loopEnd = (len - fade) / ctx.sampleRate;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass'; bp.frequency.value = 480; bp.Q.value = 0.6;
-    const gust = ctx.createGain(); gust.gain.value = 1.4;
-    const lfo = (freq, depth, param) => {
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.frequency.value = freq; g.gain.value = depth;
-      o.connect(g).connect(param); o.start();
-    };
-    lfo(0.05, 260, bp.frequency);   // the wind's "colour" drifts
-    lfo(0.09, 0.6, gust.gain);      // slow gusts
-    src.connect(bp).connect(gust).connect(out);
-    src.start();
   },
 
   /* ---- Creak: a short, rough, gliding tone (stick-slip of an old wheel) ---- */
@@ -897,48 +874,134 @@ const Sound = {
     this.nextCreak = now + lerp(2.5, 6, Math.random()) / (0.6 + state.speedNorm);
   },
 
-  /* ---- Music box: a little waltz, softened and echoed so it sounds far away ---- */
+  /* ---- Fair music: a little waltz on a music box, with an "oom-pah-pah"
+     accompaniment, drifting over from a distant fair. ------------------- */
+  BEAT: 0.47,                       // seconds per beat (3 beats per bar)
+  // Chords: [bass note, [triad]] as MIDI note numbers.
+  CHORDS: {
+    C: [48, [60, 64, 67]], Am: [45, [57, 60, 64]], F: [41, [57, 60, 65]],
+    G: [43, [55, 59, 62]], Dm: [50, [57, 62, 65]], Em: [52, [55, 59, 64]],
+  },
+  // Each bar: [chord (or [chord on beat 1, chord on beats 2–3]), melody as [note, beats]...]
+  SECTION_A: [
+    ['C', [76, 1], [79, 1], [84, 1]],
+    ['Am', [84, 1], [81, 2]],
+    ['F', [77, 1], [81, 1], [84, 1]],
+    ['G', [83, 2], [79, 1]],
+    ['C', [76, 1], [79, 1], [84, 1]],
+    ['Am', [88, 1], [86, 1], [84, 1]],
+    [['Dm', 'G'], [81, 1], [77, 1], [83, 1]],
+    ['C', [84, 3]],
+  ],
+  SECTION_B: [
+    ['F', [81, 1], [84, 1], [89, 1]],
+    ['C', [88, 2], [84, 1]],
+    ['Dm', [86, 1], [81, 1], [77, 1]],
+    ['G', [79, 2], [83, 1]],
+    ['Em', [79, 1], [83, 1], [88, 1]],
+    ['Am', [84, 2], [81, 1]],
+    [['Dm', 'G'], [77, 1], [81, 1], [83, 1]],
+    ['C', [84, 3]],
+  ],
+  REST_BARS: 2,                     // quiet gap before the tune repeats
+
+  /** Turns the sections into one list of timed notes: A, B, A, then a rest. */
+  buildScore() {
+    const events = [];
+    let bar = 0;
+    for (const section of [this.SECTION_A, this.SECTION_B, this.SECTION_A]) {
+      for (const [chord, ...melody] of section) {
+        const b0 = bar * 3;
+        const [c1, c2] = Array.isArray(chord) ? chord : [chord, chord];
+        events.push({ beat: b0, voice: 'bass', note: this.CHORDS[c1][0] });
+        for (const beat of [1, 2]) for (const n of this.CHORDS[c2][1]) events.push({ beat: b0 + beat, voice: 'chord', note: n });
+        let pos = b0;
+        for (const [note, beats] of melody) { events.push({ beat: pos, voice: 'melody', note, beats }); pos += beats; }
+        bar++;
+      }
+    }
+    this.scoreBeats = (bar + this.REST_BARS) * 3;
+    this.score = events.sort((a, b) => a.beat - b.beat);
+  },
+
   buildMusicBus(L) {
     const ctx = this.ctx;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass'; lp.frequency.value = 2400;
-    const delay = ctx.createDelay(1); delay.delayTime.value = 0.33;
-    const fb = ctx.createGain(); fb.gain.value = 0.32;
-    const wet = ctx.createGain(); wet.gain.value = 0.45;
-    lp.connect(L.gain);
-    lp.connect(delay); delay.connect(fb).connect(delay); delay.connect(wet).connect(L.gain);
+    this.buildScore();
+    // Soft hall reverb from a generated impulse response.
+    const len = Math.floor(ctx.sampleRate * 2.4);
+    const ir = ctx.createBuffer(2, len, ctx.sampleRate);
+    for (let ch = 0; ch < 2; ch++) {
+      const d = ir.getChannelData(ch);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, 3.2);
+    }
+    const verb = ctx.createConvolver(); verb.buffer = ir;
+    const wet = ctx.createGain(); wet.gain.value = 0.55;
+    const dry = ctx.createGain(); dry.gain.value = 0.75;
+    // "Far away": take the edge off the top end.
+    const lp = ctx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3200; lp.Q.value = 0.4;
+    lp.connect(dry).connect(L.gain);
+    lp.connect(verb).connect(wet).connect(L.gain);
     this.musicIn = lp;
+    const pan = (v) => {
+      if (!ctx.createStereoPanner) return lp;
+      const p = ctx.createStereoPanner(); p.pan.value = v; p.connect(lp); return p;
+    };
+    this.voiceOut = { melody: pan(0.18), chord: pan(-0.22), bass: pan(-0.05) };
   },
-  // [midi note, beats]. 8 bars of 3/4, then 2 bars' rest. Bass on each bar's downbeat.
-  MELODY: [[76, 1], [79, 1], [84, 1], [83, 1], [79, 1], [76, 1], [77, 1], [81, 1], [84, 1], [83, 3],
-           [76, 1], [79, 1], [84, 1], [86, 1], [84, 1], [81, 1], [79, 1], [77, 1], [74, 1], [72, 3], [0, 6]],
-  BASS: [48, 43, 41, 43, 48, 45, 43, 48],
-  BEAT: 0.45,
+
   scheduleMusic(now) {
-    if (!this.musicT || this.musicT < now - 1) { this.musicT = now + 0.1; this.noteIdx = 0; this.beatCount = 0; }
-    while (this.musicT < now + 0.3) {
-      const [note, beats] = this.MELODY[this.noteIdx];
-      if (note) this.pluck(note, this.musicT, 0.22);
-      const bar = Math.floor(this.beatCount / 3);
-      if (this.beatCount % 3 === 0 && bar < this.BASS.length) this.pluck(this.BASS[bar], this.musicT, 0.12);
-      this.musicT += beats * this.BEAT;
-      this.beatCount += beats;
-      this.noteIdx = (this.noteIdx + 1) % this.MELODY.length;
-      if (this.noteIdx === 0) this.beatCount = 0;
+    if (!this.musicT || this.musicT < now - 1) { this.musicT = now + 0.15; this.musicIdx = 0; } // musicT = start of this loop
+    const B = this.BEAT;
+    for (;;) {
+      if (this.musicIdx >= this.score.length) { this.musicIdx = 0; this.musicT += this.scoreBeats * B; }
+      const ev = this.score[this.musicIdx];
+      const t = this.musicT + ev.beat * B;
+      if (t > now + 0.35) break;
+      const human = (Math.random() - 0.5) * 0.016;               // a few ms of human timing
+      const vel = lerp(0.85, 1.1, Math.random());                // and touch
+      if (ev.voice === 'melody') this.musicBox(ev.note, t + human, 0.2 * vel, Math.max(1.6, ev.beats * B + 1));
+      else if (ev.voice === 'chord') this.pah(ev.note, t + human, 0.035 * vel);
+      else this.oom(ev.note, t + human, 0.16 * vel);
+      this.musicIdx++;
     }
   },
-  pluck(midi, t, vol) {
+
+  /** Music-box tine: bright attack, upper partials fade first, a slightly detuned twin for shimmer. */
+  musicBox(midi, t, vol, decay) {
     const ctx = this.ctx, f = 440 * Math.pow(2, (midi - 69) / 12);
-    const env = ctx.createGain();
+    [[1, 1, decay], [1.003, 0.35, decay], [2, 0.25, decay * 0.45], [3.01, 0.1, decay * 0.25], [5.4, 0.05, 0.25]]
+      .forEach(([mult, g, d]) => {
+        const o = ctx.createOscillator(), env = ctx.createGain();
+        o.frequency.value = f * mult;
+        env.gain.setValueAtTime(0, t);
+        env.gain.linearRampToValueAtTime(vol * g, t + 0.004);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + d);
+        o.connect(env).connect(this.voiceOut.melody);
+        o.start(t); o.stop(t + d + 0.05);
+      });
+  },
+  /** Soft off-beat chord note: a short, round triangle pluck. */
+  pah(midi, t, vol) {
+    const ctx = this.ctx, o = ctx.createOscillator(), env = ctx.createGain();
+    o.type = 'triangle';
+    o.frequency.value = 440 * Math.pow(2, (midi - 69) / 12);
     env.gain.setValueAtTime(0, t);
-    env.gain.linearRampToValueAtTime(vol, t + 0.006);
-    env.gain.exponentialRampToValueAtTime(0.0005, t + 1.6);
-    env.connect(this.musicIn);
-    [[1, 1], [2, 0.22], [4.2, 0.06]].forEach(([mult, g]) => {   // tine + bright partials
-      const o = ctx.createOscillator(), og = ctx.createGain();
-      o.frequency.value = f * mult; og.gain.value = g;
-      o.connect(og).connect(env);
-      o.start(t); o.stop(t + 1.7);
+    env.gain.linearRampToValueAtTime(vol, t + 0.012);
+    env.gain.exponentialRampToValueAtTime(0.0001, t + 0.42);
+    o.connect(env).connect(this.voiceOut.chord);
+    o.start(t); o.stop(t + 0.5);
+  },
+  /** Warm bass on the downbeat. */
+  oom(midi, t, vol) {
+    const ctx = this.ctx, f = 440 * Math.pow(2, (midi - 69) / 12);
+    [[1, 1, 'sine'], [2, 0.3, 'triangle']].forEach(([mult, g, type]) => {
+      const o = ctx.createOscillator(), env = ctx.createGain();
+      o.type = type; o.frequency.value = f * mult;
+      env.gain.setValueAtTime(0, t);
+      env.gain.linearRampToValueAtTime(vol * g, t + 0.01);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + 0.9);
+      o.connect(env).connect(this.voiceOut.bass);
+      o.start(t); o.stop(t + 1);
     });
   },
 
