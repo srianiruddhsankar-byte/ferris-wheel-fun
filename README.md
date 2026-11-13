@@ -20,7 +20,8 @@ Testing tip: add `?speed=20` to the URL to make the ride 20× faster.
 ## Controls
 
 - **Start:** enter both names, then click **Board**.
-- **Corner buttons:** camera view (side / first person), Rider 1 reactions, Rider 2 reactions, sound (off by default).
+- **Corner buttons:** camera view (side / first person), Rider 1 reactions, Rider 2 reactions, sound (off by default; tap it any time, even before boarding).
+- **Sound** is generated in the browser, so no files are needed. Real recordings in `assets/` replace it layer by layer (see `assets/README.md`).
 - **Keyboard reactions:** Rider 1 uses `1`–`5`, Rider 2 uses `6`–`0` (❤️ ✨ 😂 😳 🥹).
 - **Top of the wheel:** each rider types an answer (Enter sends). When both are in, the cards flip.
 

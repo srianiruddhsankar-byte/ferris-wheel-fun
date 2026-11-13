@@ -1,8 +1,12 @@
 # Sounds
 
-The ride looks for these four looping files. They aren't included (licences vary),
-so download any you like, rename them to match, and drop them in this folder.
-Any missing file is simply skipped.
+The ride already has sound with no files: any layer without a file here is
+generated live in the browser (soft wind, a gentle creak, a music-box waltz by day,
+crickets at night).
+
+If you'd prefer real recordings, download loops you like, rename them to match the
+names below and drop them in this folder. Each file you add replaces the generated
+version of that layer; the rest keep being generated.
 
 | File               | What it is                                    | Plays when                               | Where to find one |
 |--------------------|-----------------------------------------------|------------------------------------------|-------------------|

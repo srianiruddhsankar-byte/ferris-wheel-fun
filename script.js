@@ -77,13 +77,15 @@ const CONFIG = {
   RIDER_CABIN_COLOR: '#f7a28b',
   FIREFLY_COLORS: ['#ff9ecf', '#7fe3d6', '#ffe27a', '#c8a8ff', '#a8f0a0'],
 
-  /* ---- Sound (0..1) ----------------------------------------------------- */
+  /* ---- Sound ------------------------------------------------------------ */
+  // Optional real recordings. Any file that's missing is generated live instead.
   SOUND_FILES: {
     wind: 'assets/wind.mp3',
     creak: 'assets/wheel-creak.mp3',
     fair: 'assets/fair-music.mp3',
     crickets: 'assets/crickets.mp3',
   },
+  // Layer volumes, 0..1
   SOUND_LEVELS: { wind: 0.35, creak: 0.22, fair: 0.3, crickets: 0.32 },
 
   /* ---- Reactions -------------------------------------------------------- */
@@ -757,56 +759,215 @@ function updateWindows(dt) {
 }
 
 /* ---- Sound ----------------------------------------------------------------
-   Layered loops whose volumes follow the ride. Files are optional: if one is
-   missing the rest still play. Over http(s) we route through Web Audio gain
-   nodes (iOS ignores <audio>.volume); from file:// we fall back to .volume. */
+   Four layers whose volumes follow the ride: wind (always), wheel creak (while
+   moving), a distant music-box tune by day, crickets at night.
+
+   Each layer uses a real file from /assets if one is there (see
+   CONFIG.SOUND_FILES); otherwise it is generated live with the Web Audio API,
+   so the ride has sound with no files at all. */
 const Sound = {
-  tracks: {},
   ctx: null,
+  master: null,
+  layers: {},     // name → { el, fileReady, gain, direct, synth, vol }
+  noise: null,
+
+  /** Look for real files in the background. Missing files are fine. */
   init() {
     for (const [name, src] of Object.entries(CONFIG.SOUND_FILES)) {
-      const el = new Audio(src);
-      el.loop = true; el.preload = 'auto'; el.volume = 0;
-      el.addEventListener('error', () => { this.tracks[name].missing = true; });
-      this.tracks[name] = { el, vol: 0, gain: null, missing: false };
+      const el = new Audio();
+      el.loop = true; el.preload = 'auto';
+      const L = (this.layers[name] = { el, fileReady: false, gain: null, direct: false, synth: false, vol: 0 });
+      el.addEventListener('canplaythrough', () => { L.fileReady = true; }, { once: true });
+      el.addEventListener('error', () => {}, { once: true });
+      el.src = src;
     }
   },
-  ensureGraph() {
-    if (this.ctx || !/^https?:/.test(location.protocol) || !window.AudioContext) return;
-    try {
-      this.ctx = new AudioContext();
-      for (const t of Object.values(this.tracks)) {
-        const src = this.ctx.createMediaElementSource(t.el);
-        t.gain = this.ctx.createGain();
-        t.gain.gain.value = 0;
-        src.connect(t.gain).connect(this.ctx.destination);
-        t.el.volume = 1;
+
+  /** Build the audio graph on the first tap of the sound button. */
+  build() {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return false;
+    const ctx = (this.ctx = new AC());
+    this.master = ctx.createGain();
+    this.master.gain.value = 0.9;
+    this.master.connect(ctx.destination);
+    const http = /^https?:/.test(location.protocol);
+
+    for (const [name, L] of Object.entries(this.layers)) {
+      L.gain = ctx.createGain();
+      L.gain.gain.value = 0;
+      L.gain.connect(this.master);
+      if (L.fileReady && http) {
+        ctx.createMediaElementSource(L.el).connect(L.gain);       // real file through Web Audio
+      } else if (L.fileReady) {
+        L.direct = true; L.el.volume = 0;                         // file:// → plain <audio>
+      } else {
+        L.synth = true;                                           // generated live
+        if (name === 'wind') this.buildWind(L.gain);
+        if (name === 'fair') this.buildMusicBus(L);
       }
-    } catch (err) { this.ctx = null; }
+    }
+    return true;
   },
+
   setEnabled(on) {
+    if (on && !this.ctx && !this.build()) return;
+    if (!this.ctx) return;
+    const files = Object.values(this.layers).filter((L) => !L.synth);
     if (on) {
-      this.ensureGraph();
-      this.ctx?.resume();
-      for (const t of Object.values(this.tracks)) if (!t.missing) t.el.play().catch(() => {});
+      this.ctx.resume();
+      files.forEach((L) => L.el.play().catch(() => {}));
+      this.nextCreak = this.nextChirp = this.ctx.currentTime + 0.5;
+      this.musicT = 0;
     } else {
-      for (const t of Object.values(this.tracks)) t.el.pause();
+      files.forEach((L) => L.el.pause());
+      this.ctx.suspend();
     }
   },
-  /** Called every frame: crossfade fair music → crickets, creak follows wheel speed. */
+
+  /** Called every frame: set layer volumes and schedule generated notes. */
   mix() {
-    if (!state.soundOn) return;
-    const L = CONFIG.SOUND_LEVELS, p = state.p;
+    if (!state.soundOn || !this.ctx || this.ctx.state !== 'running') return;
+    const lv = CONFIG.SOUND_LEVELS, p = state.p;
     const riding = ['up', 'down'].includes(state.phase);
     const target = {
-      wind: L.wind,
-      creak: riding ? L.creak * (0.3 + 0.7 * state.speedNorm) : 0,
-      fair: L.fair * (1 - smoothstep(0.42, 0.62, p)),
-      crickets: L.crickets * smoothstep(0.5, 0.7, p),
+      wind: lv.wind,
+      creak: riding ? lv.creak * (0.3 + 0.7 * state.speedNorm) : 0,
+      fair: lv.fair * (1 - smoothstep(0.42, 0.62, p)),
+      crickets: lv.crickets * smoothstep(0.5, 0.7, p),
     };
-    for (const [name, t] of Object.entries(this.tracks)) {
-      t.vol += (target[name] - t.vol) * 0.04; // smooth fades
-      if (t.gain) t.gain.gain.value = t.vol; else t.el.volume = clamp(t.vol, 0, 1);
+    const now = this.ctx.currentTime;
+    for (const [name, L] of Object.entries(this.layers)) {
+      if (Math.abs(target[name] - L.vol) < 0.002) continue;
+      L.vol = target[name];
+      if (L.direct) L.el.volume = clamp(L.vol, 0, 1);
+      else L.gain.gain.setTargetAtTime(L.vol, now, 0.6); // smooth crossfades
+    }
+    const S = this.layers;
+    if (S.creak.synth && target.creak > 0.005) this.scheduleCreaks(now);
+    if (S.fair.synth && target.fair > 0.005) this.scheduleMusic(now); else this.musicT = 0;
+    if (S.crickets.synth && target.crickets > 0.005) this.scheduleCrickets(now);
+  },
+
+  /* ---- Wind: brown noise through a slowly wandering band-pass filter ---- */
+  buildWind(out) {
+    const ctx = this.ctx;
+    const len = ctx.sampleRate * 8, fade = ctx.sampleRate * 0.5;
+    const buf = ctx.createBuffer(1, len, ctx.sampleRate), d = buf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < len; i++) { last = (last + 0.02 * (Math.random() * 2 - 1)) / 1.02; d[i] = last * 3.5; }
+    for (let i = 0; i < fade; i++) { const t = i / fade; d[i] = d[i] * t + d[len - fade + i] * (1 - t); } // seamless loop
+    const src = ctx.createBufferSource();
+    src.buffer = buf; src.loop = true; src.loopEnd = (len - fade) / ctx.sampleRate;
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = 480; bp.Q.value = 0.6;
+    const gust = ctx.createGain(); gust.gain.value = 1.4;
+    const lfo = (freq, depth, param) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = freq; g.gain.value = depth;
+      o.connect(g).connect(param); o.start();
+    };
+    lfo(0.05, 260, bp.frequency);   // the wind's "colour" drifts
+    lfo(0.09, 0.6, gust.gain);      // slow gusts
+    src.connect(bp).connect(gust).connect(out);
+    src.start();
+  },
+
+  /* ---- Creak: a short, rough, gliding tone (stick-slip of an old wheel) ---- */
+  scheduleCreaks(now) {
+    if (now < this.nextCreak) return;
+    const ctx = this.ctx, t = now + 0.03, dur = lerp(0.35, 0.7, Math.random());
+    const o = ctx.createOscillator();
+    o.type = 'sawtooth';
+    const f0 = lerp(65, 110, Math.random());
+    o.frequency.setValueAtTime(f0, t);
+    o.frequency.linearRampToValueAtTime(f0 * lerp(1.2, 1.7, Math.random()), t + dur);
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass'; bp.frequency.value = lerp(650, 1100, Math.random()); bp.Q.value = 5;
+    const stick = ctx.createGain(); stick.gain.value = 0.5;          // judder
+    const jl = ctx.createOscillator(), jg = ctx.createGain();
+    jl.type = 'square'; jl.frequency.value = lerp(22, 40, Math.random()); jg.gain.value = 0.5;
+    jl.connect(jg).connect(stick.gain);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(5, t + dur * 0.3);   // make-up gain: the filter removes most of the tone
+    env.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(bp).connect(stick).connect(env).connect(this.layers.creak.gain);
+    o.start(t); jl.start(t); o.stop(t + dur + 0.05); jl.stop(t + dur + 0.05);
+    this.nextCreak = now + lerp(2.5, 6, Math.random()) / (0.6 + state.speedNorm);
+  },
+
+  /* ---- Music box: a little waltz, softened and echoed so it sounds far away ---- */
+  buildMusicBus(L) {
+    const ctx = this.ctx;
+    const lp = ctx.createBiquadFilter();
+    lp.type = 'lowpass'; lp.frequency.value = 2400;
+    const delay = ctx.createDelay(1); delay.delayTime.value = 0.33;
+    const fb = ctx.createGain(); fb.gain.value = 0.32;
+    const wet = ctx.createGain(); wet.gain.value = 0.45;
+    lp.connect(L.gain);
+    lp.connect(delay); delay.connect(fb).connect(delay); delay.connect(wet).connect(L.gain);
+    this.musicIn = lp;
+  },
+  // [midi note, beats]. 8 bars of 3/4, then 2 bars' rest. Bass on each bar's downbeat.
+  MELODY: [[76, 1], [79, 1], [84, 1], [83, 1], [79, 1], [76, 1], [77, 1], [81, 1], [84, 1], [83, 3],
+           [76, 1], [79, 1], [84, 1], [86, 1], [84, 1], [81, 1], [79, 1], [77, 1], [74, 1], [72, 3], [0, 6]],
+  BASS: [48, 43, 41, 43, 48, 45, 43, 48],
+  BEAT: 0.45,
+  scheduleMusic(now) {
+    if (!this.musicT || this.musicT < now - 1) { this.musicT = now + 0.1; this.noteIdx = 0; this.beatCount = 0; }
+    while (this.musicT < now + 0.3) {
+      const [note, beats] = this.MELODY[this.noteIdx];
+      if (note) this.pluck(note, this.musicT, 0.22);
+      const bar = Math.floor(this.beatCount / 3);
+      if (this.beatCount % 3 === 0 && bar < this.BASS.length) this.pluck(this.BASS[bar], this.musicT, 0.12);
+      this.musicT += beats * this.BEAT;
+      this.beatCount += beats;
+      this.noteIdx = (this.noteIdx + 1) % this.MELODY.length;
+      if (this.noteIdx === 0) this.beatCount = 0;
+    }
+  },
+  pluck(midi, t, vol) {
+    const ctx = this.ctx, f = 440 * Math.pow(2, (midi - 69) / 12);
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(vol, t + 0.006);
+    env.gain.exponentialRampToValueAtTime(0.0005, t + 1.6);
+    env.connect(this.musicIn);
+    [[1, 1], [2, 0.22], [4.2, 0.06]].forEach(([mult, g]) => {   // tine + bright partials
+      const o = ctx.createOscillator(), og = ctx.createGain();
+      o.frequency.value = f * mult; og.gain.value = g;
+      o.connect(og).connect(env);
+      o.start(t); o.stop(t + 1.7);
+    });
+  },
+
+  /* ---- Crickets: three crickets with their own pitch, rhythm and position ---- */
+  CRICKETS: [
+    { f: 4300, every: 0.9, pan: -0.6 },
+    { f: 4650, every: 1.25, pan: 0.5 },
+    { f: 3950, every: 1.6, pan: 0.1 },
+  ],
+  scheduleCrickets(now) {
+    const ctx = this.ctx;
+    for (const c of this.CRICKETS) {
+      if (!c.next || c.next < now - 1) c.next = now + Math.random();
+      while (c.next < now + 0.3) {
+        const t = c.next, o = ctx.createOscillator(), env = ctx.createGain();
+        o.frequency.value = c.f * lerp(0.98, 1.02, Math.random());
+        env.gain.setValueAtTime(0, t);
+        for (let k = 0; k < 3; k++) {            // one chirp = three quick pulses
+          const s = t + k * 0.05;
+          env.gain.setValueAtTime(0, s);
+          env.gain.linearRampToValueAtTime(0.15, s + 0.008);
+          env.gain.linearRampToValueAtTime(0, s + 0.032);
+        }
+        let node = o.connect(env);
+        if (ctx.createStereoPanner) { const pn = ctx.createStereoPanner(); pn.pan.value = c.pan; node = node.connect(pn); }
+        node.connect(this.layers.crickets.gain);
+        o.start(t); o.stop(t + 0.2);
+        c.next += c.every * lerp(0.85, 1.15, Math.random()) + (Math.random() < 0.15 ? 1.5 : 0); // occasional pause
+      }
     }
   },
 };
